@@ -10,7 +10,7 @@ import "https://github.com/OpenZeppelin/openzeppelin-solidity/contracts/GSN/Cont
  POLL CONTRACT 
 ***************/
 
-contract PeepsPoll {
+contract PollingStation {
     
     using SafeMath for uint256;
     
@@ -18,9 +18,10 @@ contract PeepsPoll {
     uint256 public periodDuration; // set length of period for a poll (1 = 1 second)
     uint256 public pollLength; // set length of the poll in periods 
     uint256 public startTime; // set start time for poll
+    uint256 public creationTime; // needed to determine the current period
     address public pollster; // creator of the poll
     address public voteToken; // token used to decide voting weight
-    uint256 public creationTime; // needed to determine the current period
+    string public pollingStationName;
     
     // HARD-CODED LIMITS
     // Set arbitrarily because of gas limits...you know 
@@ -31,18 +32,20 @@ contract PeepsPoll {
     //EVENTS 
     event PeepsPollingCreated(address pollster, address voteToken, uint256 periodDuration);
     event RegisterVoters(address[] newVoters, uint256[] voterTokens);
-    event CreateBallot(uint256 proposalIndex, uint256 startingPeriod, uint256 pollLength, string[] options, string details);
+    event CreateBallot(uint256 proposalIndex, uint256 startingPeriod, uint256 pollLength, bytes32[] options, string details);
     event SubmitVote(uint256 proposalIndex, address voter, string option, uint256 tokensSpent, uint256 quadraticVotes);
+    event TabulateBallot(uint256 ballotIndex, string winningOption);
+    event Abort(uint256 ballotIndex);
     event UpdateDelegateKey(address sender, address newDelegateKey);
+    
 
     //This is a type for a voter.    
      struct Voter {
         address delegate; // allows for user to delegate vote to a different personal wallet address 
         uint256 tokenBalance; // index of the voted proposal
-        uint256 highestIndexVote; // highest ballot index # on which the member voted 
-        uint256 penaltyBox; // set to the period in which the member is placed in the penalty box
-        bool exists; // always true once a member has been created
-      
+        uint256 highestIndexVote; // highest ballot index # on which the voter voted 
+        uint256 penaltyBox; // set to the period in which the voter is placed in the penalty box
+        bool exists; // always true once a voter has been created
     }
     
     struct userBallot {
@@ -53,12 +56,12 @@ contract PeepsPoll {
     }
     
     struct Ballot {
-        string[] options; // list of options to include in a ballot
+        bytes32[] options; // list of options to include in a ballot
         uint256[] totalVotes; // total votes each candidate received
         uint256[] totalQuadraticVotes; // calculation of quadratic votes for each candidate
         uint256 startingPeriod; // the period in which voting can start for this proposal
         uint256 pollLength; // the period when the proposal closes
-        string winningProposal; // name of winning option
+        bytes32 winningOption; // name of winning option
         bool tabulated; // true only if the proposal has been processed
         bool aborted; // true only if applicant calls "abort" fn before end of voting period
         string details; // proposal details - could be IPFS hash, plaintext, or JSON
@@ -78,22 +81,21 @@ contract PeepsPoll {
 
    // mapping of proposals for proposalId
     mapping(uint256 => Ballot) public ballots;
-    //  dynamically-sized array of `Ballot` structs.
     Ballot[] public ballotQueue;
 
 
     constructor(
         address _pollster,
         address _voteToken,
-        uint256 _periodDuration
+        uint256 _periodDuration,
+        string  memory _pollingStationName
         ) public {
-            
-
         
         voteToken = _voteToken;
         pollster = _pollster;
         voteToken = _voteToken;
         periodDuration = _periodDuration;
+        pollingStationName = _pollingStationName;
         creationTime = now; 
         
         emit PeepsPollingCreated(_pollster, _voteToken, _periodDuration);
@@ -104,38 +106,44 @@ contract PeepsPoll {
     ***************/
     
     // registers new voters, set voterTokens to 0 if you don't want to mint new tokens for that voter
-    function registerVoters(address[] newVoters, uint256[] voterTokens) external onlyPollster {
-        require(newvoters.length == voterTokens.length, "your arrays do not match in length");
+    function registerVoters(address[] memory newVoters, uint256[] memory voterTokens) external onlyPollster {
+        require(newVoters.length == voterTokens.length, "your arrays do not match in length");
         
         for (uint256 i = 0; i < newVoters.length; i++) {
-            _registerVoter(newVoters[i], voterToken[i]);
+            _registerVoter(newVoters[i], voterTokens[i]);
         }
         
         emit RegisterVoters(newVoters, voterTokens);
-        
     }
         
-    function _registerVoter(address newVoter, uint256 voterTokens) internal {  // if new member is already taken by a member's delegateKey, reset it to their member address
+    function _registerVoter(address newVoter, uint256 voterTokens) internal {  
+        // if new voter is already taken by a voters's delegateKey, reset it to their voter address
         if (voters[voterAddressByDelegateKey[newVoter]].exists == true) {
             address voterToOverride = voterAddressByDelegateKey[newVoter];
             voterAddressByDelegateKey[voterToOverride] = voterToOverride;
-            voters[voterToOverride].delegateKey = voterToOverride;
+            voters[voterToOverride].delegate = voterToOverride;
         }
+        
+        uint256 allocatedTokens = voterTokens;
         
         if (voterTokens > 0) {
             require(IERC20(voteToken).approve(address(this), voterTokens), "approval failed");
-            require(IERC20(voteToken).tranferFrom(address(this), newVoter, voterTokens), "token transfer failed");
+            require(IERC20(voteToken).transferFrom(address(this), newVoter, allocatedTokens), "token transfer failed");
         }
         
+        
+        
         voters[newVoter] = Voter({
-            delegateKey : newVoter,
-            exists : true,
-            tokenBalance : setUserTokenBalance(newVoter),
-            highestIndexYesVote : 0,
-            penaltyBox : 0
+        delegate: newVoter,// allows for user to delegate vote to a different personal wallet address 
+        tokenBalance: 0, // index of the voted proposal
+        highestIndexVote: 0, // highest ballot index # on which the voter voted 
+        penaltyBox: 0, // set to the period in which the voter is placed in the penalty box
+        exists: true // always true once a voter has been created
         });
 
         voterAddressByDelegateKey[newVoter] = newVoter;
+        uint256 initialTokenBalance = getVoterTokenBalance(newVoter);
+        voters[newVoter].tokenBalance = initialTokenBalance;
     }
     
     /*****************
@@ -143,61 +151,71 @@ contract PeepsPoll {
     *****************/
 
     function createBallot(
-        string[] memory options,
-        uint256 pollLength,
+        bytes32[] memory options,
+        uint256 _startingPeriod,
+        uint256 _pollLength,
         string memory details
     )
         public onlyPollster {
         require(options.length > 0, "Need to have at least 1 option.");
         require(options.length < MAX_OPTIONS);
         for (uint i=0; i < options.length; i++) {
-            require(options[i] != "", "Option cannot be blank");
+            require(options[i] != 0, "Option cannot be blank");
         }
+        require(_startingPeriod > getCurrentPeriod().add(1), "must set starting period in future");
 
-        // compute startingPeriod for ballot
-        uint256 startingPeriod = max(
-            getCurrentPeriod(),
-            proposalQueue.length == 0 ? 0 : proposalQueue[proposalQueue.length.sub(1)].startingPeriod
-        ).add(1);
 
-        // create proposal ...
+        // create new ballot for some votes ...
         
-        Proposal memory proposal = Proposal({
-            proposer: msg.sender,
+        /*
+        bytes32[] options; // list of options to include in a ballot
+        uint256[] totalVotes; // total votes each candidate received
+        uint256[] totalQuadraticVotes; // calculation of quadratic votes for each candidate
+        uint256 startingPeriod; // the period in which voting can start for this proposal
+        uint256 pollLength; // the period when the proposal closes
+        string winningOption; // name of winning option
+        bool tabulated; // true only if the proposal has been processed
+        bool aborted; // true only if applicant calls "abort" fn before end of voting period
+        string details; // proposal details - could be IPFS hash, plaintext, or JSON
+        mapping (address => userBallot) votesByVoter; // list of options and corresponding votes
+        */
+        
+        Ballot memory ballot = Ballot({
             options: options,
             totalVotes: new uint256[](options.length),
             totalQuadraticVotes: new uint256[](options.length),
-            startingPeriod: startingPeriod,
-            pollLength: pollLength,
-            winningProposal: "",
+            startingPeriod: _startingPeriod,
+            pollLength: _pollLength,
+            winningOption: 0,
             tabulated: false,
             aborted: false,
             details: details
         });
 
         // ... and append it to the queue
-        proposalQueue.push(proposal);
+       ballotQueue.push(ballot);
 
-        uint256 proposalIndex = proposalQueue.length.sub(1);  
+        uint256 ballotIndex = ballotQueue.length.sub(1);  
         
-        emit CreateBallot(proposalIndex, startingPeriod, pollLength, options, details);
+        emit CreateBallot(ballotIndex, _startingPeriod, _pollLength, options, details);
     }
     
     
-     function submitVote(uint256 proposalIndex, string option, uint256 votes) public onlyDelegate {
+     function submitVote(uint256 ballotIndex, string memory option, uint256 votes) public  {
+        require(voters[voterAddressByDelegateKey[msg.sender]].exists = true, "not a voter");
         
         address voterAddress = voterAddressByDelegateKey[msg.sender];
         Voter storage voter = voters[voterAddress];
-        require(proposalIndex < proposalQueue.length, "Ballot does not exist");
+        require(ballotIndex < ballotQueue.length, "Ballot does not exist");
         
-        Proposal storage proposal = proposalQueue[proposalIndex];
+        Ballot storage ballot = ballotQueue[ballotIndex];
         
         require(votes > 0, "At least one vote must be cast");
         require(getCurrentPeriod() >= ballot.startingPeriod, "Voting period has not started");
         require(!hasVotingPeriodExpired(ballotIndex), "Voting period has expired");
         require(!ballot.aborted, "Ballot has been aborted");
 
-        Ballot storage memberBallot = ballot.votesByVoter[voterAddress];
+        userBallot storage voterBallot = ballot.votesByVoter[voterAddress];
 
         // store vote
         uint256 totalVotes;
@@ -205,148 +223,97 @@ contract PeepsPoll {
         uint256 quadraticVotes;
 
         //Set empty array for new ballot
-        if (memberBallot.votes.length == 0) {
-            memberBallot.votes = new uint256[](proposal.candidates.length);
-            memberBallot.candidate = new address[](proposal.candidates.length);
-            memberBallot.quadraticVotes = new uint256[](proposal.candidates.length);
+        if (voterBallot.votes.length == 0) {
+            voterBallot.votes = new uint256[](ballot.options.length);
+            voterBallot.option = new string[](ballot.options.length);
+            voterBallot.quadraticVotes = new uint256[](ballot.options.length);
         }
-        for (uint i = 0; i < proposal.candidates.length; i++) {
-            if (proposal.candidates[i] == candidate) {
-                newVotes = memberBallot.votes[i].add(votes);
-                uint256 prevquadraticVotes = memberBallot.quadraticVotes[i];
+         
+        for (uint i = 0; i < ballot.options.length; i++) {
+            if (ballot.options[i] == option) {
+                newVotes = userBallot.votes[i].add(votes);
+                uint256 prevquadraticVotes = userBallot.quadraticVotes[i];
                 quadraticVotes = sqrt(newVotes);
-                proposal.totalVotes[i] = proposal.totalVotes[i].add(votes);
-                proposal.totalQuadraticVotes[i] = proposal.totalQuadraticVotes[i].sub(prevquadraticVotes).add(quadraticVotes);
-                memberBallot.candidate[i] = candidate;
-                memberBallot.votes[i] = newVotes;
-                memberBallot.quadraticVotes[i] = quadraticVotes;
-                if (proposalIndex > member.highestIndexVote) {
-                    member.highestIndexVote = proposalIndex;
+                ballot.totalVotes[i] = ballot.totalVotes[i].add(votes);
+                ballot.totalQuadraticVotes[i] = ballot.totalQuadraticVotes[i].sub(prevquadraticVotes).add(quadraticVotes);
+                voterBallot.option[i] = option;
+                voterBallot.votes[i] = newVotes;
+                voterBallot.quadraticVotes[i] = quadraticVotes;
+                if (ballotIndex > voter.highestIndexVote) {
+                    voter.highestIndexVote = ballotIndex;
                 }           
             } 
-            totalVotes = totalVotes.add(memberBallot.votes[i]);
+            totalVotes = totalVotes.add(voterBallot.votes[i]);
         }
 
-        require(totalVotes <= member.shares, "QuadraticMoloch::submitVote - not enough shares to cast this quantity of votes");
+        require(totalVotes <= voter.tokenBalance, "Not enough tokens to cast this quantity of votes");
+        require(IERC20(voteToken).tranfer(address(this), totalVotes), "vote token transfer failed");
 
-        emit SubmitVote(proposalIndex, msg.sender, memberAddress, option, votes, quadraticVotes);
+        emit SubmitVote(ballotIndex, msg.sender, voterAddress, option, votes, quadraticVotes);
     }
 
-    function processProposal(uint256 proposalIndex) public {
-        require(proposalIndex < proposalQueue.length, "Moloch::processProposal - proposal does not exist");
-        Proposal storage proposal = proposalQueue[proposalIndex];
+    function tabulateBallot(uint256 ballotIndex) public onlyPollster {
+        require(ballotIndex < ballotQueue.length, "Ballot does not exist");
+        Ballot storage ballot = ballotQueue[ballotIndex];
 
-        require(getCurrentPeriod() >= proposal.startingPeriod.add(votingPeriodLength).add(gracePeriodLength), "Moloch::processProposal - proposal is not ready to be processed");
-        require(proposal.processed == false, "Moloch::processProposal - proposal has already been processed");
-        require(proposalIndex == 0 || proposalQueue[proposalIndex.sub(1)].processed, "Moloch::processProposal - previous proposal must be processed");
+        require(getCurrentPeriod() >= ballot.startingPeriod.add(ballot.pollLength), "Voting has not ended is not ready to be processed");
+        require(ballot.tabulated == false, "Ballot has already been tabulated");
+        require(ballotIndex == 0 || ballotQueue[ballotIndex.sub(1)].tabulated, "Previous ballot must be tabulated first");
 
-        proposal.processed = true;
-        totalSharesRequested = totalSharesRequested.sub(proposal.sharesRequested);
+       
 
-        // Get elected candidate
+        // Get favorite option
         uint256 largest = 0;
-        uint elected = 0;
-        require(proposal.totalVotes.length > 0, "QuadraticMoloch::processProposal - this proposal has not received any votes.");
+        uint chosen = 0;
+        require(ballot.totalVotes.length > 0, "This ballot has not received any votes.");
         bool didPass = true;
-        for (uint i = 0; i < proposal.totalVotes.length; i++) {
-            if (quadraticMode) {
-                require(proposal.totalQuadraticVotes[i] != largest, "QuadraticMoloch::processProposal - this proposal has no winner" );
-                if (proposal.totalQuadraticVotes[i] > largest) {
-                    largest = proposal.totalQuadraticVotes[i];
-                    elected = i;
+        for (uint i = 0; i < ballot.totalVotes.length; i++) {
+                require(ballot.totalQuadraticVotes[i] != largest, "This ballot has no winner" );
+                if (ballot.totalQuadraticVotes[i] > largest) {
+                    largest = ballot.totalQuadraticVotes[i];
+                    chosen = i;
                 }
-            } else if (proposal.totalVotes[i] > largest) {
-                largest = proposal.totalVotes[i];
-                elected = i;
-            }
+                
+            string memory winningOption = ballot.options[i]; 
+            
+             if (didPass && !ballot.aborted) {
+                ballot.didPass = true;
+                ballot.winningOption = winningOption;
+            }  
+        }
         
-            address electedCandidate = proposal.candidates[i];
-
-            // Make the proposal fail if the dilutionBound is exceeded
-            if (totalShares.mul(dilutionBound) < proposal.maxTotalSharesAtYesVote) {
-                didPass = false;
-            }
-
-            // PROPOSAL PASSED
-            if (didPass && !proposal.aborted) {
-
-                proposal.didPass = true;
-                proposal.electedCandidate = electedCandidate;
-
-                // if the elected candidate is already a member, add to their existing shares
-                if (members[electedCandidate].exists) {
-                    members[electedCandidate].shares = members[electedCandidate].shares.add(proposal.sharesRequested);
-
-                // the applicant is a new member, create a new record for them
-                } else {
-                    // if the applicant address is already taken by a member's delegateKey, reset it to their member address
-                    if (members[memberAddressByDelegateKey[electedCandidate]].exists) {
-                        address memberToOverride = memberAddressByDelegateKey[electedCandidate];
-                        memberAddressByDelegateKey[memberToOverride] = memberToOverride;
-                        members[memberToOverride].delegateKey = memberToOverride;
-                    }
-
-                    // use elected candidate address as delegateKey by default
-                    members[electedCandidate] = Member(electedCandidate, proposal.sharesRequested, true, 0);
-                    memberAddressByDelegateKey[electedCandidate] = electedCandidate;
-                }
-
-                // mint new shares
-                totalShares = totalShares.add(proposal.sharesRequested);
-
-                // transfer tokens to guild bank from winner
-                require(
-                approvedToken.transfer(address(guildBank), proposal.tokenTribute),
-                "Moloch::processProposal - token transfer to guild bank failed"
-                );
-                // return tokens to other candidates
-                for (uint k = 0; k < proposal.candidates.length; k++) {
-                    if (proposal.candidates[k] != electedCandidate) {
-                        require(
-                        approvedToken.transfer(proposal.candidates[k], proposal.tokenTribute),
-                        "Moloch::processProposal - token transfer to guild bank failed"
-                        );
-                    }
-                }
-
-            // PROPOSAL FAILED OR ABORTED
-            } else {
-                // return all tokens to the candidates
-                for (uint z = 0; z < proposal.candidates.length; z++) {
-                    require(
-                    approvedToken.transfer(proposal.candidates[z], proposal.tokenTribute),
-                    "Moloch::processProposal - token transfer to guild bank failed"
-                    );
-                }
-            }
-
-            // send msg.sender the processingReward
-            require(
-                approvedToken.transfer(msg.sender, processingReward),
-                "Moloch::processProposal - failed to send processing reward to msg.sender"
-            );
-
-            // return deposit to proposer (subtract processing reward)
-            require(
-                approvedToken.transfer(proposal.proposer, proposalDeposit.sub(processingReward)),
-                "Moloch::processProposal - failed to return proposal deposit to proposer"
-            );
+            string memory winningOption = ballot.winningOption;
+            ballot.tabulated = true;
 
             emit TabulateBallot(ballotIndex, winningOption);
         }
-    }
+        
+     function abort(uint256 ballotIndex) public onlyPollster {
+        require(ballotIndex < ballotQueue.length, "Moloch::abort - proposal does not exist");
+        Ballot storage ballot = ballotQueue[ballotIndex];
+
+        require(getCurrentPeriod() < ballot.startingPeriod, "Voting period cannot have started");
+        require(!ballot.aborted, "Ballot must not have already been aborted");
+
+        ballot.aborted = true;
+
+        emit Abort(ballotIndex);
+    }    
 
     
     /***************
     VOTER HELPER FUNCTIONS
     ***************/
     
-    function getVoterTokenBalance(address voter) external view {
+    function getVoterTokenBalance(address voter) public view returns (uint256) {
         require(voters[voter].exists == true, "voter does not exist yet");
-        require(IERC20(voteToken).balanceOf(voter), "no token balance visible");
+        require(IERC20(voteToken).balanceOf(voter) > 0, "no token balance");
+        
+        return IERC20(voteToken).balanceOf(voter);
+        
     }
     
-    function setVoterTokenBalance(address voter) internal {
+    function updateVoterTokenBalance(address voter) internal returns (uint256) {
         require(voters[msg.sender].exists == true, "no voter on record");
         voters[voter].tokenBalance == IERC20(voteToken).balanceOf(voter);
     }
@@ -355,9 +322,9 @@ contract PeepsPoll {
         require(voters[msg.sender].tokenBalance > 0, "not a current voter");
         require(newDelegateKey != address(0), "newDelegateKey zeroed");
 
-        // skip checks if member is setting the delegate key to their member address
+        // skip checks if voter is setting the delegate key to their voter address
         if (newDelegateKey != msg.sender) {
-            require(voters[newDelegateKey].exists == false, "cannot overwrite members");
+            require(voters[newDelegateKey].exists == false, "cannot overwrite voters");
             require(voters[voterAddressByDelegateKey[newDelegateKey]].exists == false, "cannot overwrite keys");
         }
 
@@ -370,16 +337,23 @@ contract PeepsPoll {
     }
     
     function getCurrentPeriod() public view returns (uint256) {
-        return now.sub(summoningTime).div(periodDuration);
+        return now.sub(creationTime).div(periodDuration);
     }
     
-    function hasVotingPeriodExpired(uint256 proposalIndex) public view returns (bool) {
-        Proposal storage proposal = proposalQueue[proposalIndex];
-        return getCurrentPeriod() >= proposal.startingPeriod + proposal.pollLength;
+    function hasVotingPeriodExpired(uint256 ballotIndex) public view returns (bool) {
+        Ballot storage ballot = ballotQueue[ballotIndex];
+        return getCurrentPeriod() >= ballot.startingPeriod + ballot.pollLength;
     }
     
-    
-
+    function sqrt(uint256 x) internal pure returns (uint256 y) {
+        uint256 z = (x + 1) / 2;
+        y = x;
+        while (z < y) {
+            y = z;
+            z = (x / z + z) / 2;
+        }
+    }
+}
   
 
 /***************
@@ -394,13 +368,8 @@ contract PeepsPollFactory {
     uint256 public pollTax;
     address payable public peepsWallet; 
     
-    //array of polls 
-
-    PeepsPoll private Poll;
-    address[] public polls; 
-    
     //events
-    event newPoll(address indexed Poll, address indexed pollster);
+    event NewPollingStation(address PollingStation, address pollster, address voteToken);
     
     constructor (
         uint256 _pollTax, 
@@ -410,26 +379,20 @@ contract PeepsPollFactory {
         peepsWallet = _peepsWallet;
     }
     
-    function newPeepsPoll( // public can issue stamped lex token for factory ether (Ξ) fee
-    string memory _pollName, 
-    address payable[] memory _pollTokens,
-	address payable[] memory _pollTakers,
-	address _pollster) payable public {
-	require(msg.value == pollTax);
-	require(peepsWallet != address(0));
+    function newPollingStation(
+        address _pollster,
+        address _voteToken,
+        uint256 _periodDuration,
+        string memory _pollingStationName) payable public {
+        PollingStation = new PollingStation(
+            _pollster, 
+            _voteToken,
+            _periodDuration,
+            _pollingStationName);
         
-        Poll = (new PeepsPoll).value(msg.value)(
-            _pollName, 
-            _pollTokens, 
-            _pollTakers,
-            _pollster);
-        
-        polls.push(address(Poll));
         address(peepsWallet).transfer(msg.value);
-        emit newPoll(address(Poll), _pollster);
+        
+        emit NewPollingStation(address(PollingStation), _pollster, _voteToken);
     }
     
-    function getPollCount() public view returns (uint256 PollCount) {
-        return polls.length;
-    }
 }    
