@@ -52,9 +52,10 @@ contract PollingStation {
         address owner;
         uint256[] votes;
         uint256[] quadraticVotes;
-        string[] options;
+        bytes32[] options;
     }
     
+    // @Dev in v2 call this an "Election" 
     struct Ballot {
         bytes32[] options; // list of options to include in a ballot
         uint256[] totalVotes; // total votes each candidate received
@@ -201,7 +202,7 @@ contract PollingStation {
     }
     
     
-     function submitVote(uint256 ballotIndex, string memory option, uint256 votes) public  {
+     function submitVote(uint256 ballotIndex, bytes32 option, uint256 votes) public  {
         require(voters[voterAddressByDelegateKey[msg.sender]].exists = true, "not a voter");
         
         address voterAddress = voterAddressByDelegateKey[msg.sender];
@@ -221,22 +222,23 @@ contract PollingStation {
         uint256 totalVotes;
         uint256 newVotes;
         uint256 quadraticVotes;
+        
 
         //Set empty array for new ballot
         if (voterBallot.votes.length == 0) {
             voterBallot.votes = new uint256[](ballot.options.length);
-            voterBallot.option = new string[](ballot.options.length);
             voterBallot.quadraticVotes = new uint256[](ballot.options.length);
+            voterBallot.options = new bytes32[](ballot.options.length);
         }
          
         for (uint i = 0; i < ballot.options.length; i++) {
             if (ballot.options[i] == option) {
-                newVotes = userBallot.votes[i].add(votes);
-                uint256 prevquadraticVotes = userBallot.quadraticVotes[i];
+                newVotes = voterBallot.votes[i].add(votes);
+                uint256 prevquadraticVotes = voterBallot.quadraticVotes[i];
                 quadraticVotes = sqrt(newVotes);
                 ballot.totalVotes[i] = ballot.totalVotes[i].add(votes);
                 ballot.totalQuadraticVotes[i] = ballot.totalQuadraticVotes[i].sub(prevquadraticVotes).add(quadraticVotes);
-                voterBallot.option[i] = option;
+                voterBallot.options[i] = option;
                 voterBallot.votes[i] = newVotes;
                 voterBallot.quadraticVotes[i] = quadraticVotes;
                 if (ballotIndex > voter.highestIndexVote) {
@@ -247,7 +249,7 @@ contract PollingStation {
         }
 
         require(totalVotes <= voter.tokenBalance, "Not enough tokens to cast this quantity of votes");
-        require(IERC20(voteToken).tranfer(address(this), totalVotes), "vote token transfer failed");
+        require(IERC20(voteToken).transfer(address(this), votes), "vote token transfer failed");
 
         emit SubmitVote(ballotIndex, msg.sender, voterAddress, option, votes, quadraticVotes);
     }
@@ -274,15 +276,14 @@ contract PollingStation {
                     chosen = i;
                 }
                 
-            string memory winningOption = ballot.options[i]; 
+            bytes32 winningOption = ballot.options[i]; 
             
-             if (didPass && !ballot.aborted) {
-                ballot.didPass = true;
+             if (!ballot.aborted) {
                 ballot.winningOption = winningOption;
             }  
         }
         
-            string memory winningOption = ballot.winningOption;
+            bytes32 winningOption = ballot.winningOption;
             ballot.tabulated = true;
 
             emit TabulateBallot(ballotIndex, winningOption);
@@ -329,9 +330,9 @@ contract PollingStation {
         }
 
         Voter storage voter = voters[msg.sender];
-        voterAddressByDelegateKey[voter.delegateKey] = address(0);
+        voterAddressByDelegateKey[voter.delegate] = address(0);
         voterAddressByDelegateKey[newDelegateKey] = msg.sender;
-        voter.delegateKey = newDelegateKey;
+        voter.delegate = newDelegateKey;
 
         emit UpdateDelegateKey(msg.sender, newDelegateKey);
     }
